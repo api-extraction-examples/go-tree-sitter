@@ -1,5 +1,5 @@
-#include "../alloc.h"
-#include "../array.h"
+#include "alloc.h"
+#include "array.h"
 #include "parser.h"
 
 #include <wctype.h>
