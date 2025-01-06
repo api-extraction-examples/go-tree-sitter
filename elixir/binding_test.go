@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/elixir"
+	sitter "github.com/api-extraction-examples/go-tree-sitter"
+	"github.com/api-extraction-examples/go-tree-sitter/elixir"
 	"github.com/stretchr/testify/assert"
 )
 

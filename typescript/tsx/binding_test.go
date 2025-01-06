@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/typescript/tsx"
+	sitter "github.com/api-extraction-examples/go-tree-sitter"
+	"github.com/api-extraction-examples/go-tree-sitter/typescript/tsx"
 	"github.com/stretchr/testify/assert"
 )
 
