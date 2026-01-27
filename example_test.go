@@ -12,10 +12,10 @@ import (
 	"github.com/api-extraction-examples/go-tree-sitter/golang"
 )
 
-// ExampleCursorTraversal recursively prints the tree using TreeCursor.
+// Example_cursorTraversal recursively prints the tree using TreeCursor.
 //
 // The cursor provides each node name.
-func ExampleCursorTraversal() {
+func Example_cursorTraversal() {
 	root := mustParseGo("func f(a, b, c int, d, e int)")
 
 	c := sitter.NewTreeCursor(root)
@@ -45,11 +45,11 @@ func ExampleCursorTraversal() {
 	//                 type: type_identifier [15-18]
 }
 
-// ExampleChildTraversal recursively prints the tree using Node.Child for traversal.
+// Example_childTraversal recursively prints the tree using Node.Child for traversal.
 //
 // Node names are supplied by the parent.
 // Beware: they are current wrong due to https://github.com/tree-sitter/tree-sitter/issues/1642!
-func ExampleChildTraversal() {
+func Example_childTraversal() {
 	root := mustParseGo("func f(a, b, c int, d, e int)")
 
 	var visit func(n *sitter.Node, name string, depth int)

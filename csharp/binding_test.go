@@ -24,7 +24,7 @@ func TestGrammar(t *testing.T) {
 func TestGrammar2(t *testing.T) {
 	assert := assert.New(t)
 
-	content, err := os.ReadFile("testt.cs") // testt.cs is: https://github.com/Universalis-FFXIV/Universalis/blob/bc38866d8cbc85ed95df46f432bc896b697f218c/src/Universalis.Application/Controllers/V2/WebSocketController.cs#L10
+	content, err := os.ReadFile("testing/testt.cs") // testt.cs is: https://github.com/Universalis-FFXIV/Universalis/blob/bc38866d8cbc85ed95df46f432bc896b697f218c/src/Universalis.Application/Controllers/V2/WebSocketController.cs#L10
 	assert.NoError(err)
 
 	n, err := sitter.ParseCtx(context.Background(), content, csharp.GetLanguage())
