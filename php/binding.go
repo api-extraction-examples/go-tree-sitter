@@ -1,6 +1,6 @@
 package php
 
-//#include "parser.h"
+//#include "tree_sitter/parser.h"
 //TSLanguage *tree_sitter_php();
 import "C"
 import (
