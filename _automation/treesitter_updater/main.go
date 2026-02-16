@@ -35,11 +35,13 @@ func main() {
 		log.Fatalf("Error: %v", err)
 	}
 
-	// Copy necessary files to tmpts directory
-	copyFiles(filepath.Join(parentPath, "lib", "include", "tree_sitter"), filepath.Join(currentDir, "tmpts"), "*.h")
-	copyFiles(filepath.Join(parentPath, "lib", "src"), filepath.Join(currentDir, "tmpts"), "*.c")
-	copyFiles(filepath.Join(parentPath, "lib", "src"), filepath.Join(currentDir, "tmpts"), "*.h")
-	copyFiles(filepath.Join(parentPath, "lib", "src", "unicode"), filepath.Join(currentDir, "tmpts"), "*.h")
+	// Copy files to tmpts directory, preserving subdirectory structure
+	// to avoid header name collisions with system headers (e.g. endian.h).
+	// Subdirectories are discovered automatically so the script doesn't need
+	// updating when upstream adds new ones.
+	tmpDir := filepath.Join(currentDir, "tmpts")
+	copyDirContents(filepath.Join(parentPath, "lib", "include"), tmpDir)
+	copyDirContents(filepath.Join(parentPath, "lib", "src"), tmpDir)
 
 	// Remove the original extracted directory
 	err = os.RemoveAll(parentPath)
@@ -47,16 +49,19 @@ func main() {
 		log.Fatalf("Error removing extracted treesitter directory: %v", err)
 	}
 
-	// Modify include paths in the copied files
-	if err := modifyIncludePaths(filepath.Join(currentDir, "tmpts")); err != nil {
-		log.Fatalf("Error modifying include paths: %v", err)
-	}
-
 	// Clean up unnecessary files
 	cleanup(filepath.Join(currentDir, "tmpts"))
 
+	// Generate doc.go in subdirectories that only contain C headers, so that
+	// go mod vendor will include them. See https://github.com/golang/go/issues/26366
+	docDirs, err := generateDocFiles(filepath.Join(currentDir, "tmpts"))
+	if err != nil {
+		log.Fatalf("Error generating doc.go files: %v", err)
+	}
+
 	// Copy and report files from tmpts to two levels up in the directory structure
-	err = copyAndReportFiles(filepath.Join(currentDir, "tmpts"), filepath.Join(currentDir, "..", ".."))
+	dstDir := filepath.Join(currentDir, "..", "..")
+	err = copyAndReportFiles(filepath.Join(currentDir, "tmpts"), dstDir)
 	if err != nil {
 		log.Fatalf("Error copying and reporting files: %v", err)
 	}
@@ -65,6 +70,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error removing tmpts directory: %v", err)
 	}
+
+	// Check bindings.go for missing blank imports of doc.go subdirectories.
+	checkBlankImports(filepath.Join(dstDir, "bindings.go"), docDirs)
 
 	fmt.Printf("\n\nDone!\n")
 }
@@ -99,19 +107,22 @@ func copyAndReportFiles(srcDir, dstDir string) error {
 	})
 }
 
-// Function to copy files matching a pattern from source to destination directory
-func copyFiles(srcDir, dstDir, pattern string) {
-	files, err := ioutil.ReadDir(srcDir)
+// copyDirContents copies .c and .h files from srcDir into dstDir, preserving
+// any subdirectory structure. Subdirectories are discovered automatically.
+func copyDirContents(srcDir, dstDir string) {
+	entries, err := ioutil.ReadDir(srcDir)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	// Iterate through files and copy if they match the pattern
-	for _, file := range files {
-		if matched, _ := filepath.Match(pattern, file.Name()); matched {
-			srcFilePath := filepath.Join(srcDir, file.Name())
-			dstFilePath := filepath.Join(dstDir, file.Name())
-			copyFile(srcFilePath, dstFilePath)
+	for _, entry := range entries {
+		src := filepath.Join(srcDir, entry.Name())
+		if entry.IsDir() {
+			copyDirContents(src, filepath.Join(dstDir, entry.Name()))
+			continue
+		}
+		ext := filepath.Ext(entry.Name())
+		if ext == ".c" || ext == ".h" {
+			copyFile(src, filepath.Join(dstDir, entry.Name()))
 		}
 	}
 }
@@ -124,6 +135,11 @@ func copyFile(src, dst string) error {
 		return err
 	}
 
+	// Ensure destination directory exists
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+
 	// Write the file to destination
 	err = ioutil.WriteFile(dst, input, 0644)
 	if err != nil {
@@ -132,30 +148,78 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-// Function to modify include paths in .c and .h files
-func modifyIncludePaths(path string) error {
-	// Walk through the directory and modify files
-	return filepath.Walk(path, func(filePath string, info os.FileInfo, err error) error {
+// generateDocFiles creates a doc.go in each subdirectory of root that contains
+// only header files and no Go files. Without a .go file, go mod vendor skips
+// the directory. Directories with .c files are excluded because Go would try
+// to compile them without proper CGo setup.
+// Returns the list of subdirectory names that received a doc.go.
+func generateDocFiles(root string) ([]string, error) {
+	entries, err := ioutil.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var dirs []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, entry.Name())
+		files, err := ioutil.ReadDir(dir)
 		if err != nil {
-			return err
+			return nil, err
 		}
-
-		// Skip directories and non .c/.h files
-		if info.IsDir() || (filepath.Ext(filePath) != ".c" && filepath.Ext(filePath) != ".h") {
-			return nil
+		hasH, hasC, hasGo := false, false, false
+		for _, f := range files {
+			switch filepath.Ext(f.Name()) {
+			case ".h":
+				hasH = true
+			case ".c":
+				hasC = true
+			case ".go":
+				hasGo = true
+			}
 		}
-
-		// Read the file content
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			return err
+		if hasH && !hasC && !hasGo {
+			content := fmt.Sprintf(
+				"// Package %s contains C header files for tree-sitter.\n"+
+					"// This file exists solely to ensure go mod vendor copies this directory.\n"+
+					"// See: https://github.com/golang/go/issues/26366\n"+
+					"package %s\n",
+				entry.Name(), entry.Name())
+			path := filepath.Join(dir, "doc.go")
+			if err := ioutil.WriteFile(path, []byte(content), 0644); err != nil {
+				return nil, err
+			}
+			fmt.Printf("%-39s %s\n", "doc.go ("+entry.Name()+")", "[generated]")
+			dirs = append(dirs, entry.Name())
 		}
+	}
+	return dirs, nil
+}
 
-		// Modify the content and write back
-		modifiedContent := strings.ReplaceAll(string(content), `"tree_sitter/`, `"`)
-		modifiedContent = strings.ReplaceAll(modifiedContent, `"unicode/`, `"`)
-		return os.WriteFile(filePath, []byte(modifiedContent), info.Mode())
-	})
+// checkBlankImports reads bindings.go and warns about any doc.go subdirectories
+// that are missing a blank import. Without the blank import, go mod vendor will
+// not copy the subdirectory even though it contains a doc.go.
+func checkBlankImports(bindingsPath string, docDirs []string) {
+	content, err := ioutil.ReadFile(bindingsPath)
+	if err != nil {
+		return
+	}
+	src := string(content)
+	var missing []string
+	for _, dir := range docDirs {
+		// Look for a blank import like: _ ".../<dir>"
+		if !strings.Contains(src, "/"+dir+"\"") {
+			missing = append(missing, dir)
+		}
+	}
+	if len(missing) > 0 {
+		fmt.Printf("\nWARNING: The following subdirectories have doc.go but no blank import in bindings.go:\n")
+		for _, dir := range missing {
+			fmt.Printf("  _ \"github.com/api-extraction-examples/go-tree-sitter/%s\"\n", dir)
+		}
+		fmt.Printf("Add the above import(s) to bindings.go so that go mod vendor copies these directories.\n")
+	}
 }
 
 // Function to download and extract Tree Sitter from the given URL

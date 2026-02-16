@@ -15,6 +15,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"unsafe"
+
+	// Blank imports to ensure go mod vendor copies header-only subdirectories.
+	// See: https://github.com/golang/go/issues/26366
+	_ "github.com/api-extraction-examples/go-tree-sitter/tree_sitter"
+	_ "github.com/api-extraction-examples/go-tree-sitter/unicode"
 )
 
 // maintain a map of read functions that can be called from C
