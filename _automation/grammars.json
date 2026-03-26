@@ -27,9 +27,9 @@
       "parser.c",
       "scanner.c"
     ],
-    "reference": "v0.23.1",
-    "revision": "362a8a41b265056592a0c3771664a21d23a71392",
-    "updateBasedOn": "tag"
+    "reference": "master",
+    "revision": "88366631d598ce6595ec655ce1591b315cffb14c",
+    "updateBasedOn": "commit"
   },
   {
     "language": "cpp",
