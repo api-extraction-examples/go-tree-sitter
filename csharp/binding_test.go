@@ -186,6 +186,42 @@ func TestCSharp_ObjectInitializerQualifiedMember(t *testing.T) {
 	}
 }
 
+// TestCSharp12_CollectionExpressionInArgPosition verifies NV-4233:
+// C# 12 collection expressions [item] passed as method-call arguments
+// parse cleanly. Fixed by upstream PR #402 which added the
+// collection_expression / collection_element / expression_element /
+// spread_element rules; this repo picks up the fix by upgrading the
+// vendored tree-sitter-c-sharp pin to v0.23.5.
+//
+// The ticket's literal example uses `[field]`, but `field` is a C# 13
+// contextual keyword and is not in the upstream grammar's
+// _reserved_identifier choice. That defect is the same root cause as
+// NV-4232 (async:/await: as named-arg labels) and is addressed by a
+// follow-up patch. Cases here use non-keyword names; the literal
+// [field] form is covered by TestCSharp13_FieldAsBarewordIdentifier.
+// `[async]` is not covered: keeping `async` out of _reserved_identifier
+// is intentional because that breaks the upstream Async-Lambda corpus
+// test, and the named-arg form (Foo(async: ...)) is the hot path.
+func TestCSharp12_CollectionExpressionInArgPosition(t *testing.T) {
+	cases := map[string]string{
+		"single-item-middle":    `class C { void M() { db.HashFieldExpire(key, [item], TimeSpan.FromHours(1)); } }`,
+		"with-out-and-ref":      `class C { void M() { HashDelete(key, [item], out itemsDoneCount, ref ctx); } }`,
+		"multi-item":            `class C { void M() { F([a, b, c]); } }`,
+		"spread":                `class C { void M() { F([..xs, last]); } }`,
+		"empty-as-arg":          `class C { void M() { F([]); } }`,
+		"as-only-arg":           `class C { void M() { F([42]); } }`,
+		"nested-in-object-init": `class C { void M() { var x = new Foo { Items = [a, b] }; } }`,
+	}
+	for name, code := range cases {
+		t.Run(name, func(t *testing.T) {
+			ast := assertCleanParse(t, code)
+			if !strings.Contains(ast, "collection_expression") {
+				t.Errorf("expected collection_expression in AST: %s", ast)
+			}
+		})
+	}
+}
+
 // TestCSharp_NullConditionalFluentInTernary verifies NV-4236: null-conditional
 // (?.) fluent call chains used as operands of a conditional expression parse
 // cleanly. Closed by the C# 12/13 grammar upgrade; this test is a regression
