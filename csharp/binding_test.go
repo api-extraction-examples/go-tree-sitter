@@ -142,3 +142,70 @@ func TestCSharp13_FullFile(t *testing.T) {
 	// Partial properties may not be fully supported; allow a small number of errors
 	assert.LessOrEqual(errorCount, 2, "C# 13 test fixture should have at most 2 parse errors")
 }
+
+// assertCleanParse parses code and asserts no ERROR or MISSING nodes.
+func assertCleanParse(t *testing.T, code string) string {
+	t.Helper()
+	n, err := sitter.ParseCtx(context.Background(), []byte(code), csharp.GetLanguage())
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	ast := n.String()
+	if strings.Contains(ast, "ERROR") || strings.Contains(ast, "MISSING") {
+		t.Errorf("expected clean parse, got AST: %s", ast)
+	}
+	return ast
+}
+
+// TestCSharp_ObjectInitializerQualifiedMember verifies NV-4235: object
+// initializers whose property values are qualified member-access expressions
+// (e.g. Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping) parse cleanly.
+// This pattern triggered a visitor-side panic in NV-3800; the visitor was
+// fixed in api-excavator and the parser-side ambiguity appears to have been
+// resolved by the C# 12/13 grammar upgrade. This test is a regression guard.
+func TestCSharp_ObjectInitializerQualifiedMember(t *testing.T) {
+	cases := map[string]string{
+		"jsonwriter-options": `class C {
+    private static readonly JsonWriterOptions WriterOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        Indented = false,
+        SkipValidation = true
+    };
+}`,
+		"deeper-qualifier": `class C { void M() { var x = new Foo { Bar = A.B.C.D.E }; } }`,
+		"single-property": `class C { void M() { var x = new Foo { Bar = Ns.Type.Member }; } }`,
+	}
+	for name, code := range cases {
+		t.Run(name, func(t *testing.T) {
+			ast := assertCleanParse(t, code)
+			if !strings.Contains(ast, "initializer_expression") {
+				t.Errorf("expected initializer_expression in AST: %s", ast)
+			}
+		})
+	}
+}
+
+// TestCSharp_NullConditionalFluentInTernary verifies NV-4236: null-conditional
+// (?.) fluent call chains used as operands of a conditional expression parse
+// cleanly. Closed by the C# 12/13 grammar upgrade; this test is a regression
+// guard.
+func TestCSharp_NullConditionalFluentInTernary(t *testing.T) {
+	cases := map[string]string{
+		"simple-chain-in-then": `class C { string M(object o) => c ? o?.Foo()?.Bar?.ToString() : null; }`,
+		"complex-chain-in-else": `class C { string M() => useDefault ? null : Definition?.Methods?.FirstOrDefault(m => m.Name == n)?.GetParameters()?.Length.ToString(); }`,
+		"semantic-model-shape": `class C { void M() {
+    var x = (testMode == TestMode.None)
+        ? compilation?.SemanticModel?.GetSymbolInfo(node)?.Symbol?.ContainingType?.ToDisplayString()
+        : null;
+} }`,
+	}
+	for name, code := range cases {
+		t.Run(name, func(t *testing.T) {
+			ast := assertCleanParse(t, code)
+			if !strings.Contains(ast, "conditional_expression") {
+				t.Errorf("expected conditional_expression in AST: %s", ast)
+			}
+		})
+	}
+}
