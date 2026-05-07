@@ -222,6 +222,40 @@ func TestCSharp12_CollectionExpressionInArgPosition(t *testing.T) {
 	}
 }
 
+// TestCSharp12_CollectionExpressionInTernary verifies NV-4311: an empty
+// or non-empty C# 12 collection expression appearing as a branch of a
+// conditional (ternary) expression parses cleanly. Originally this
+// pattern was misparsed because `b?[]` could match
+// array_type(nullable_type(b), array_rank_specifier([])) and that path
+// won during conflict resolution. Adding collection_expression in
+// upstream PR #402 (vendored via the v0.23.5 pin) resolves both the
+// then-branch and else-branch shapes plus the cascade case from
+// upstream issue #406.
+func TestCSharp12_CollectionExpressionInTernary(t *testing.T) {
+	cases := map[string]string{
+		"empty-then":       `class C { object x = b ? [] : null; }`,
+		"empty-else":       `class C { object x = b ? null : []; }`,
+		"non-empty-then":   `class C { object x = b ? [1] : null; }`,
+		"bitwarden-shape":  `class C { object Discounts = phase1Ended ? [] : phase2.Discounts?.Select(d => new D { X = 1 }); }`,
+		"upstream-cascade": "class C { void M() { var x = new Entry { Data = condition ? [] : Map(item, context), Other = Get(value) }; void Method() { } } }",
+	}
+	for name, code := range cases {
+		t.Run(name, func(t *testing.T) {
+			ast := assertCleanParse(t, code)
+			// Both nodes are required: a regression that loses the
+			// ternary wrapping (e.g. by parsing `b?[]` as a nullable
+			// array type) would still contain a collection_expression
+			// somewhere and slip past a single-substring check.
+			if !strings.Contains(ast, "conditional_expression") {
+				t.Errorf("expected conditional_expression in AST: %s", ast)
+			}
+			if !strings.Contains(ast, "collection_expression") {
+				t.Errorf("expected collection_expression in AST: %s", ast)
+			}
+		})
+	}
+}
+
 // TestCSharp_NullConditionalFluentInTernary verifies NV-4236: null-conditional
 // (?.) fluent call chains used as operands of a conditional expression parse
 // cleanly. Closed by the C# 12/13 grammar upgrade; this test is a regression
