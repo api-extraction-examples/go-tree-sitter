@@ -285,6 +285,31 @@ func TestCSharp13_FieldAsBarewordIdentifier(t *testing.T) {
 	}
 }
 
+// TestCSharp_RefPartialStructModifierOrder verifies NV-4234: a struct
+// declaration accepts `ref` at any position among its modifiers
+// (orleans/Writer.cs:102 has `public ref partial struct Writer<T>`).
+// Upstream pins `ref` immediately before `struct`, forcing all other
+// modifiers to precede it. Tracked against upstream issue #361.
+func TestCSharp_RefPartialStructModifierOrder(t *testing.T) {
+	cases := map[string]string{
+		"public-ref-partial":          `public ref partial struct W { }`,
+		"public-partial-ref":          `public partial ref struct W { }`,
+		"bare-ref-partial":            `ref partial struct W { }`,
+		"public-ref":                  `public ref struct W { }`,
+		"with-where-constraint":       `public ref partial struct W<T> where T : IBufferWriter<byte> { }`,
+		"orleans-writer-shape":        `namespace N { public ref partial struct Writer<TBufferWriter> where TBufferWriter : IBufferWriter<byte> { } }`,
+		"plain-struct":                `public struct W { }`,
+	}
+	for name, code := range cases {
+		t.Run(name, func(t *testing.T) {
+			ast := assertCleanParse(t, code)
+			if !strings.Contains(ast, "struct_declaration") {
+				t.Errorf("expected struct_declaration in AST: %s", ast)
+			}
+		})
+	}
+}
+
 // TestCSharp_PointerDerefParenAndCast verifies NV-4231: unsafe
 // pointer dereference of a parenthesized expression or a cast result
 // parses cleanly. The patch has two parts and this test covers both:
