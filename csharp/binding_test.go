@@ -222,6 +222,69 @@ func TestCSharp12_CollectionExpressionInArgPosition(t *testing.T) {
 	}
 }
 
+// TestCSharp_ContextualKeywordAsNamedArgLabel verifies NV-4232: when
+// a method-call argument uses a contextual keyword as its label
+// (Foo(x, async: true)), the parser must accept the keyword as the
+// argument name rather than emit ERROR at the colon. Patch the
+// argument rule to admit `async`/`await` via _argument_name_keyword,
+// matching Roslyn behavior. The `field` named-arg case lives in
+// TestCSharp13_FieldAsBarewordIdentifier below; that keyword reaches
+// argument names via _reserved_identifier rather than this patch.
+func TestCSharp_ContextualKeywordAsNamedArgLabel(t *testing.T) {
+	cases := []struct {
+		name, code string
+		// namedArgs is the total number of `name:` argument labels in
+		// the snippet. Asserting on the count (not just presence) means
+		// a regression that loses one specific keyword label still
+		// fails the test, even when other plain-identifier labels in
+		// the same call would satisfy a substring check.
+		namedArgs int
+	}{
+		{"async-only", `class C { void M() { Foo(async: true); } }`, 1},
+		{"async-after-positional", `class C { void M() { Foo(1, async: true); } }`, 1},
+		{"await-after-positional", `class C { void M() { Foo(x, await: y); } }`, 1},
+		{"garnet-shape", `class C { void M() { ClusterReplicate(1, primaryId, async: true, logger: ctx.logger); } }`, 2},
+		{"multi-named-keyword", `class C { void M() { Foo(replicaNodeIndex: r, primaryNodeIndex: p, failEx: false, async: true, logger: l); } }`, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ast := assertCleanParse(t, tc.code)
+			// `(argument name: (identifier` is the unique marker for a
+			// named-arg label. The bare `name: (identifier` substring
+			// also appears for class/method names and member-access
+			// names, so it would over-count.
+			got := strings.Count(ast, "(argument name: (identifier")
+			if got != tc.namedArgs {
+				t.Errorf("expected %d named-arg labels, got %d. AST: %s", tc.namedArgs, got, ast)
+			}
+		})
+	}
+}
+
+// TestCSharp13_FieldAsBarewordIdentifier verifies that the C# 13
+// contextual keyword `field` (partial-property accessor backing field)
+// can also appear as a regular identifier in expression position. This
+// closes the keyword sub-case of NV-4233: F([field]) and similar
+// patterns from garnet/RespHashTests.cs:98-100 parse cleanly. The
+// upstream `field:` attribute target use site continues to work via
+// the [_reserved_identifier, attribute_target_specifier] conflict.
+func TestCSharp13_FieldAsBarewordIdentifier(t *testing.T) {
+	cases := map[string]string{
+		"in-collection-arg":         `class C { void M() { F([field]); } }`,
+		"in-middle-collection-arg":  `class C { void M() { F(key, [field], time); } }`,
+		"as-rhs":                    `class C { void M() { var x = field; } }`,
+		"in-method-arg":             `class C { void M() { F(field); } }`,
+		"as-named-arg-label":        `class C { void M() { Foo(field: 1); } }`,
+		"in-fluent-chain":           `class C { void M() { db.HashFieldExpire(key, [field], TimeSpan.FromHours(1)); } }`,
+		"attribute-target-preserved": `[field: NonSerialized] class C { }`,
+	}
+	for name, code := range cases {
+		t.Run(name, func(t *testing.T) {
+			assertCleanParse(t, code)
+		})
+	}
+}
+
 // TestCSharp_PointerDerefParenAndCast verifies NV-4231: unsafe
 // pointer dereference of a parenthesized expression or a cast result
 // parses cleanly. The patch has two parts and this test covers both:
