@@ -222,6 +222,44 @@ func TestCSharp12_CollectionExpressionInArgPosition(t *testing.T) {
 	}
 }
 
+// TestCSharp_PointerDerefParenAndCast verifies NV-4231: unsafe
+// pointer dereference of a parenthesized expression or a cast result
+// parses cleanly. The patch has two parts and this test covers both:
+//
+//  1. Operand widening: _pointer_indirection_expression now accepts
+//     parenthesized_expression and cast_expression, not just
+//     lvalue_expression. Without it, *(p + 1) and *(long*)(ptr + idx)
+//     in argument position fail. Covered by the deref-* / multi-arg-*
+//     cases.
+//
+//  2. Assignment-context conflict declaration: the widened operand
+//     introduces a shift-reduce ambiguity at the trailing `=` for
+//     patterns like *(int*)p = 5, resolved by the
+//     [$.assignment_expression, $.expression] conflict. Covered by
+//     deref-as-rhs and deref-as-lvalue.
+//
+// Tracked against upstream issue #363.
+func TestCSharp_PointerDerefParenAndCast(t *testing.T) {
+	cases := map[string]string{
+		"deref-paren-binary":    `class C { unsafe void M() { Set(*(p + 1)); } }`,
+		"deref-cast-paren":      `class C { unsafe void M() { Set(*(long*)(p + 1)); } }`,
+		"deref-cast-method":     `class C { unsafe void M() { keys.Add(*(long*)key.ToPointer()); } }`,
+		"multi-arg-deref-cast":  `class C { unsafe void M() { Set(init_keys, count, *(long*)(chunk_ptr + idx)); } }`,
+		"deref-cast-byte":       `class C { unsafe void M() { AreEqual((byte)flag, *(payloadPtr + entry)); } }`,
+		"deref-as-rhs":          `class C { unsafe void M() { x = *(int*)p; } }`,
+		"deref-as-lvalue":       `class C { unsafe void M() { *(int*)p = 5; } }`,
+		"deref-simple":          `class C { unsafe void M() { Set(*p); } }`,
+	}
+	for name, code := range cases {
+		t.Run(name, func(t *testing.T) {
+			ast := assertCleanParse(t, code)
+			if !strings.Contains(ast, "prefix_unary_expression") {
+				t.Errorf("expected prefix_unary_expression in AST: %s", ast)
+			}
+		})
+	}
+}
+
 // TestCSharp12_CollectionExpressionInTernary verifies NV-4311: an empty
 // or non-empty C# 12 collection expression appearing as a branch of a
 // conditional (ternary) expression parses cleanly. Originally this
