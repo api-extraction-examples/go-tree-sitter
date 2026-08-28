@@ -10,11 +10,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"text/tabwriter"
 )
 
@@ -91,8 +95,17 @@ func root(args []string) error {
 		force := fs.Bool("force", false, "re-download grammar even if revision is the same")
 		flagsParse(fs, args[2:])
 
-		s.Update(ctx, args[1], *force)
+		updated := s.Update(ctx, args[1], *force)
 		s.writeGrammarsFile(ctx)
+
+		// A caller naming a single grammar asked for that grammar, and an exit
+		// status alone would not otherwise distinguish a skip from a completed
+		// update. update-all deliberately does not do this: csharp and php are
+		// patched permanently, so failing the run on one of them would make a
+		// non-zero exit its steady state.
+		if !updated {
+			return fmt.Errorf("%s was left untouched; see the warning above", args[1])
+		}
 
 	case "update-all":
 		fs := flag.NewFlagSet("update-all", flag.ExitOnError)
@@ -103,6 +116,12 @@ func root(args []string) error {
 
 	default:
 		return fmt.Errorf("unknown sub-command")
+	}
+
+	// Reported only now: grammars.json has been written, so the grammars that
+	// did update are recorded before the run fails.
+	if patchGuardTripped.Load() {
+		return fmt.Errorf("a locally patched file was left untouched; see the error above")
 	}
 
 	return nil
@@ -175,7 +194,9 @@ func (s *UpdateService) fetchNewVersions() []*GrammarVersion {
 	return results
 }
 
-func (s *UpdateService) Update(ctx context.Context, language string, force bool) {
+// Update reports whether the grammar's sources were re-downloaded. False means
+// it was skipped because it carries local patches.
+func (s *UpdateService) Update(ctx context.Context, language string, force bool) bool {
 	logger := getLogger(ctx).With("language", language)
 
 	grammar, ok := s.grammarsMap[language]
@@ -193,12 +214,28 @@ func (s *UpdateService) Update(ctx context.Context, language string, force bool)
 		} else {
 			logger.Warn("re-downloading up-to-date grammar")
 		}
-	} else {
+	}
+
+	// Set before downloading, never after. Every downloader interpolates
+	// grammar.Revision into its URL, and that revision is a concrete commit
+	// resolved by git ls-remote rather than a symbolic ref the server would
+	// resolve to tip, so recording the new revision afterwards would re-fetch
+	// the revision already vendored and then claim the new one.
+	prevReference, prevRevision := grammar.Reference, grammar.Revision
+	if v != nil {
 		grammar.Reference = v.Reference
 		grammar.Revision = v.Revision
 	}
 
-	s.downloadGrammar(ctx, grammar)
+	if !s.downloadGrammar(ctx, grammar) {
+		// Nothing was written, so put the pin back: recording a revision for
+		// files that were left untouched would make grammars.json describe
+		// sources that do not match it.
+		grammar.Reference, grammar.Revision = prevReference, prevRevision
+		return false
+	}
+
+	return true
 }
 
 func (s *UpdateService) UpdateAll(ctx context.Context, force bool) {
@@ -209,17 +246,37 @@ func (s *UpdateService) UpdateAll(ctx context.Context, force bool) {
 		go func(g *Grammar) {
 			defer wg.Done()
 
-			s.Update(ctx, g.Language, force)
+			// Outcome ignored: a skipped grammar is reported by downloadGrammar
+			// and must not stop the rest of the batch.
+			_ = s.Update(ctx, g.Language, force)
 		}(g)
 	}
 	wg.Wait()
 }
 
-func (s *UpdateService) downloadGrammar(ctx context.Context, g *Grammar) {
+// downloadGrammar reports whether the grammar was downloaded. False means it
+// was skipped because it carries local patches; the caller must not record a
+// new revision for it.
+func (s *UpdateService) downloadGrammar(ctx context.Context, g *Grammar) bool {
 	logger := getLogger(ctx).With("language", g.Language, "reference", g.Reference)
 	logger.Info("downloading")
 
 	ctx = context.WithValue(ctx, loggerCtxKey, logger)
+
+	// Skip before any write. Aborting instead would kill the process from
+	// inside an UpdateAll goroutine, so grammars.json would never be written
+	// and every grammar that did re-download in the same run would be left on
+	// disk with its old revision still recorded.
+	if patched := locallyPatchedFiles(g.Language); len(patched) > 0 && !overwritePatchedAllowed() {
+		logger.Warn(
+			"skipping locally patched grammar: re-apply the patches described in its header "+
+				"against the new upstream baseline, regenerate, and replace it by hand; "+
+				"set "+allowOverwritePatchedEnv+"=1 to overwrite",
+			"files", strings.Join(patched, ", "),
+		)
+		return false
+	}
+
 	s.makeDir(ctx, g.Language)
 
 	switch g.Language {
@@ -242,6 +299,8 @@ func (s *UpdateService) downloadGrammar(ctx context.Context, g *Grammar) {
 	}
 
 	logger.Info("successfully downloaded")
+
+	return true
 }
 
 func (s *UpdateService) makeDir(ctx context.Context, path string) {
@@ -278,7 +337,103 @@ func (s *UpdateService) defaultGrammarDownload(ctx context.Context, g *Grammar) 
 	}
 }
 
+// localPatchMarker is the phrase that opens the hand-maintained header block
+// of a vendored grammar file carrying local modifications.
+const localPatchMarker = "Locally patched"
+
+// allowOverwritePatchedEnv lets a caller proceed past the patch guard once the
+// patches have been re-applied by hand. Only the exact value "1" enables it:
+// setting a flag to "0" or "false" to mean off is an ordinary shell habit, and
+// treating those as "on" would silently disable the protection.
+const allowOverwritePatchedEnv = "ALLOW_OVERWRITE_PATCHED"
+
+func overwritePatchedAllowed() bool {
+	return os.Getenv(allowOverwritePatchedEnv) == "1"
+}
+
+// isLocallyPatched reports whether a vendored file carries the hand-maintained
+// header marking local divergence from upstream.
+//
+// Only the head of the file is read: the header block sits at the top, and
+// generated parser tables run to tens of megabytes.
+func isLocallyPatched(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false // no such file, nothing to protect
+	}
+	defer f.Close()
+
+	head := make([]byte, 8192)
+	n, _ := io.ReadFull(f, head)
+	return bytes.Contains(head[:n], []byte(localPatchMarker))
+}
+
+// locallyPatchedFiles returns every file under a grammar's directory that
+// carries the marker.
+//
+// The whole directory is walked rather than reconstructing each downloader's
+// write targets: defaultGrammarDownload writes <lang>/<file>, downloadPhp also
+// writes <lang>/tree_sitter/*, and downloadTypescript writes under
+// <lang>/typescript/ and <lang>/tsx/. Walking covers all of them, and any
+// future variant, without the path list drifting out of step.
+func locallyPatchedFiles(langDir string) []string {
+	var patched []string
+	_ = filepath.WalkDir(langDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil //nolint:nilerr // an unreadable entry is not something to protect
+		}
+		if isLocallyPatched(path) {
+			patched = append(patched, path)
+		}
+		return nil
+	})
+	sort.Strings(patched)
+	return patched
+}
+
+// patchGuardTripped records that the per-file backstop blocked a write, so the
+// run can exit non-zero after it finishes.
+//
+// The backstop cannot exit on the spot: downloadFile runs inside the goroutines
+// UpdateAll spawns, and writeGrammarsFile only runs after wg.Wait() returns, so
+// terminating there would leave every grammar that did re-download recorded at
+// its old revision. That is the same desync the skip in downloadGrammar exists
+// to avoid, and a rarer trigger does not make it less damaging.
+var patchGuardTripped atomic.Bool
+
+// blockIfLocallyPatched is the last-resort per-file backstop, and reports
+// whether the write must be skipped. downloadGrammar already skips a patched
+// grammar before any write, so reaching this means a downloader wrote outside
+// its own <lang>/ directory: a bug in that downloader rather than a routine
+// condition, which is why it is loud and fails the run.
+//
+// It signals only through patchGuardTripped: downloadFile discards the result,
+// so downloadGrammar still reports success and Update keeps the advanced pin.
+// The run fails, but grammars.json is written first and records a revision the
+// vendored sources do not match. Holding the pin back would mean threading an
+// error return through every downloader, which is not worth it while the
+// pre-scan covers every write target. If a downloader ever writes outside its
+// own <lang>/ directory, widen the pre-scan rather than relying on this.
+func blockIfLocallyPatched(ctx context.Context, toPath string) bool {
+	if overwritePatchedAllowed() || !isLocallyPatched(toPath) {
+		return false
+	}
+
+	patchGuardTripped.Store(true)
+	getLogger(ctx).Error(
+		"refusing to overwrite a locally patched file written outside the grammar directory scanned "+
+			"before download; re-apply the patches described in its header against the new upstream "+
+			"baseline, regenerate, and replace it by hand; set "+allowOverwritePatchedEnv+"=1 to proceed anyway",
+		"path", toPath,
+	)
+	return true
+}
+
 func (s *UpdateService) downloadFile(ctx context.Context, url, toPath string, replaceMap map[string]string) {
+	if blockIfLocallyPatched(ctx, toPath) {
+		return
+	}
+
 	b := s.fetchFile(ctx, url)
 
 	for old, new := range replaceMap {

@@ -190,8 +190,9 @@ func TestCSharp_ObjectInitializerQualifiedMember(t *testing.T) {
 // C# 12 collection expressions [item] passed as method-call arguments
 // parse cleanly. Fixed by upstream PR #402 which added the
 // collection_expression / collection_element / expression_element /
-// spread_element rules; this repo picks up the fix by upgrading the
-// vendored tree-sitter-c-sharp pin to v0.23.5.
+// spread_element rules; this repo picked the fix up when the vendored
+// tree-sitter-c-sharp pin reached v0.23.5, and still carries it on the
+// current master pin.
 //
 // The ticket's literal example uses `[field]`, but `field` is a C# 13
 // contextual keyword and is not in the upstream grammar's
@@ -266,8 +267,11 @@ func TestCSharp_ContextualKeywordAsNamedArgLabel(t *testing.T) {
 // can also appear as a regular identifier in expression position. This
 // closes the keyword sub-case of NV-4233: F([field]) and similar
 // patterns from garnet/RespHashTests.cs:98-100 parse cleanly. The
-// upstream `field:` attribute target use site continues to work via
-// the [_reserved_identifier, attribute_target_specifier] conflict.
+// upstream `field:` attribute target use site continues to work. The
+// local GLR conflict that first made this parse has since been retired:
+// upstream now lists `field` alongside the other attribute-target
+// keywords in _reserved_identifier and disambiguates with prec(1) on
+// attribute_target_specifier.
 func TestCSharp13_FieldAsBarewordIdentifier(t *testing.T) {
 	cases := map[string]string{
 		"in-collection-arg":         `class C { void M() { F([field]); } }`,
@@ -354,7 +358,7 @@ func TestCSharp_PointerDerefParenAndCast(t *testing.T) {
 // pattern was misparsed because `b?[]` could match
 // array_type(nullable_type(b), array_rank_specifier([])) and that path
 // won during conflict resolution. Adding collection_expression in
-// upstream PR #402 (vendored via the v0.23.5 pin) resolves both the
+// upstream PR #402, vendored since the v0.23.5 pin, resolves both the
 // then-branch and else-branch shapes plus the cascade case from
 // upstream issue #406.
 func TestCSharp12_CollectionExpressionInTernary(t *testing.T) {
