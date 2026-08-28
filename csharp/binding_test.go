@@ -352,6 +352,92 @@ func TestCSharp_PointerDerefParenAndCast(t *testing.T) {
 	}
 }
 
+// TestCSharp_PointerDerefIncrementAssignmentTarget verifies that a
+// dereference of an incremented or decremented pointer works as an
+// assignment target: *p++ = v and *--p = v.
+//
+// C# binds postfix ++/-- tighter than prefix *, so *p++ means *(p++).
+// Before the operand widening, _pointer_indirection_expression took
+// only lvalue, parenthesized and cast expressions, so the parser
+// reduced *p, applied ++ to that, and had nowhere to attach `= v`,
+// emitting the assignment as a sibling ERROR node.
+//
+// The postfix case needs the dedicated _postfix_incdec_operand rule:
+// the shared postfix_unary_expression recurses through $.expression, so
+// *p can always complete as a deref and take ++ from the enclosing
+// context, and tree-sitter settles that statically rather than leaving
+// it to GLR, which puts it beyond the reach of precedence or a conflict
+// declaration.
+//
+// The deref-read and parenthesized-postfix cases are contrast coverage
+// and assert only that they still parse; both the old and the corrected
+// nesting are ERROR-free in a read position, so this test cannot tell
+// them apart. TestCSharp_PointerDerefIncrementNesting pins the nesting.
+func TestCSharp_PointerDerefIncrementAssignmentTarget(t *testing.T) {
+	cases := map[string]string{
+		"post-increment-lvalue":  `class C { unsafe void M() { *p++ = 1; } }`,
+		"post-decrement-lvalue":  `class C { unsafe void M() { *p-- = 1; } }`,
+		"pre-decrement-lvalue":   `class C { unsafe void M() { *--p = 2; } }`,
+		"pre-increment-lvalue":   `class C { unsafe void M() { *++p = 2; } }`,
+		"post-increment-in-loop": `class C { unsafe void M() { while (n-- > 0) { *d++ = *s++; } } }`,
+		"plain-deref-lvalue":     `class C { unsafe void M() { *p = 5; } }`,
+		"deref-read":             `class C { unsafe void M() { Set(*p++); } }`,
+		"parenthesized-postfix":  `class C { unsafe void M() { (*p)++; } }`,
+	}
+	for name, code := range cases {
+		t.Run(name, func(t *testing.T) {
+			assertCleanParse(t, code)
+		})
+	}
+}
+
+// TestCSharp_PointerDerefIncrementNesting pins the operator nesting for
+// *p++, which must be *(p++) and not (*p)++. Both shapes parse without
+// an ERROR node, so assertCleanParse alone cannot tell them apart, and
+// only an explicit shape assertion catches a regression to the old
+// nesting. Read position is covered as well as assignment-target
+// position: the old grammar produced (*p)++ in both, and only the
+// assignment case turned that into a parse error, so a read-position
+// regression would otherwise pass silently.
+func TestCSharp_PointerDerefIncrementNesting(t *testing.T) {
+	// *(p++) puts the postfix node inside the prefix node.
+	const derefOverIncrement = "(prefix_unary_expression (postfix_unary_expression"
+
+	cases := []struct {
+		name string
+		code string
+		want string
+	}{
+		{"assignment-target", `class C { unsafe void M() { *p++ = 1; } }`, derefOverIncrement},
+		{"read-position", `class C { unsafe void M() { Set(*p++); } }`, derefOverIncrement},
+		{"pre-decrement-target", `class C { unsafe void M() { *--p = 1; } }`, "(prefix_unary_expression (prefix_unary_expression"},
+		// The operand widening admits every prefix unary form, not just
+		// the increment and decrement ones, matching the spec production
+		// `* unary-expression`. These are type errors, not syntax errors,
+		// so the parser should accept them and leave the rest to Roslyn.
+		{"negate-operand", `class C { unsafe void M() { *-x = 1; } }`, "(prefix_unary_expression (prefix_unary_expression"},
+		{"not-operand", `class C { unsafe void M() { *!flag = 1; } }`, "(prefix_unary_expression (prefix_unary_expression"},
+		{"complement-operand", `class C { unsafe void M() { *~x = 1; } }`, "(prefix_unary_expression (prefix_unary_expression"},
+		// Explicit parentheses mean the increment really does apply to
+		// the dereferenced value, so the nesting is inverted here.
+		{"parenthesized-postfix", `class C { unsafe void M() { (*p)++; } }`, "(postfix_unary_expression (parenthesized_expression"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ast := assertCleanParse(t, tc.code)
+			if !strings.Contains(ast, tc.want) {
+				t.Errorf("wrong operator nesting: want %q in AST: %s", tc.want, ast)
+			}
+		})
+	}
+
+	// The assignment only forms when the deref is treated as an lvalue.
+	ast := assertCleanParse(t, `class C { unsafe void M() { *p++ = 1; } }`)
+	if !strings.Contains(ast, "assignment_expression") {
+		t.Errorf("expected assignment_expression in AST: %s", ast)
+	}
+}
+
 // TestCSharp12_CollectionExpressionInTernary verifies NV-4311: an empty
 // or non-empty C# 12 collection expression appearing as a branch of a
 // conditional (ternary) expression parses cleanly. Originally this
