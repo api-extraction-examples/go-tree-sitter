@@ -59,3 +59,15 @@ Temporary Items
 
 # Compiled automation tools
 _automation/treesitter_updater/treesitter_updater
+
+# Local agent config and work products
+/.agent-sandbox-config/
+/.claude-sandbox-config/
+/.codex-sandbox-config/
+# Session-local Claude Code state (keep /.claude/skills/ tracked).
+/.claude/settings.local.json
+/.claude/*.lock
+/.claude/scheduled_tasks.lock
+/.claude/todos/
+/.claude/history.jsonl
+/analysis/
